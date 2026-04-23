@@ -1,0 +1,20 @@
+# Virtual Environment
+venv/
+env/
+.env
+
+# Python generated files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Streamlit secrets (Sensitive)
+.streamlit/secrets.toml
+
+# Large Data files (Optional: remove if you want to host small samples)
+backend_demo/data/*.tif
+backend_demo/data/*.geojson
+
+# OS files
+.DS_Store
+Thumbs.db
