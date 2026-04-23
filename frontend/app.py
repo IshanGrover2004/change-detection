@@ -1,87 +1,133 @@
 import json
-
-import leafmap.foliumap as leafmap
 import requests
 import streamlit as st
+import leafmap.foliumap as leafmap
+from streamlit_folium import st_folium
 
 st.set_page_config(page_title="🌳 Deforestation Detector", layout="wide")
 
 BACKEND = "http://127.0.0.1:8000"
 
 st.title("🌍 Land Use & Deforestation Change Detection")
-st.markdown(
-    "Draw a region of interest (ROI) and compare land changes between two years."
-)
 
-col1, col2 = st.columns([1, 1.3])
+# Sidebar for configuration and debugging
+with st.sidebar:
+    st.header("⚙️ Settings")
+    debug_mode = st.checkbox("Show Raw Map Data", value=False)
+    
+    if st.button("🔌 Test Backend Connection"):
+        try:
+            r = requests.get(f"{BACKEND}/", timeout=5)
+            st.success(f"Connected! Status: {r.json()}")
+        except Exception as e:
+            st.error(f"Failed: {e}")
+
+    st.markdown("---")
+    st.markdown("### 🛠️ Fallback Tools")
+    if st.button("📍 Use Default ROI (Aurangabad)"):
+        st.session_state["roi"] = {
+            "type": "Polygon",
+            "coordinates": [[[75.2, 19.8], [75.5, 19.8], [75.5, 19.6], [75.2, 19.6], [75.2, 19.8]]]
+        }
+        st.success("Loaded default region!")
+
+col1, col2 = st.columns([1, 1.2])
 
 with col1:
     if "roi" not in st.session_state:
         st.session_state["roi"] = None
 
-    # Initialize interactive map
-    m = leafmap.Map(
-        center=[19.35, 75.75], zoom=9, draw_control=True, measure_control=True
-    )
+    st.subheader("🗺️ 1. Select Region")
+    # Initialize map
+    m = leafmap.Map(center=[19.35, 75.75], zoom=9, draw_control=True)
     m.add_basemap("HYBRID")
 
-    # Display map
-    m.to_streamlit(height=600)
+    # Use st_folium directly for better event handling
+    output = st_folium(m, height=450, width=None, key="map_v3", returned_objects=["last_draw", "all_drawings"])
 
-    print(m)
-    # Draw control GeoJSON data
-    drawings = m.user_roi_bounds()  # returns coordinates of drawn ROI (if any)
-    if drawings:
-        st.session_state["roi"] = drawings
-        st.success("✅ ROI captured! Ready for analysis.")
+    # Update ROI if drawing is detected
+    if output:
+        draw = output.get("last_draw")
+        if draw and draw.get("geometry"):
+            st.session_state["roi"] = draw["geometry"]
+        elif output.get("all_drawings"):
+            st.session_state["roi"] = output["all_drawings"][-1]["geometry"]
+
+    if debug_mode:
+        with st.expander("Raw Map Output"):
+            st.write(output)
+
+    # Current Status
+    if st.session_state.get("roi"):
+        st.success("✅ ROI captured and ready.")
+        if st.button("🗑️ Clear ROI"):
+            st.session_state["roi"] = None
+            st.rerun()
     else:
-        st.info("Please draw a polygon ROI on the map before analysis.")
+        st.info("👆 Draw a shape on the map to select an area.")
 
-    print(drawings)
+    st.markdown("---")
+    st.subheader("📅 2. Select Timeline")
+    # Parameters
+    year_before = st.number_input("Before Year", 2000, 2026, 2020)
+    year_after = st.number_input("After Year", 2000, 2026, 2025)
 
-    # Year inputs
-    year_before = st.number_input("Select BEFORE year", 2000, 2025, 2018)
-    year_after = st.number_input("Select AFTER year", 2000, 2025, 2022)
-
-    if st.button("🚀 Analyze Region"):
-        if st.session_state["roi"]:
-            coords = st.session_state["roi"]
-            geojson = {
-                "type": "Polygon",
-                "coordinates": [coords],
-            }
-
+    if st.button("🚀 Run Analysis", type="primary"):
+        if not st.session_state.get("roi"):
+            st.warning("Please draw a region first!")
+        else:
             payload = {
-                "geojson": geojson,
+                "geojson": st.session_state["roi"],
                 "year_before": year_before,
                 "year_after": year_after,
             }
-
-            with st.spinner("Processing on Google Earth Engine (~30s)..."):
+            
+            with st.spinner("Requesting Earth Engine analysis..."):
                 try:
-                    resp = requests.post(
-                        f"{BACKEND}/analyze", json=payload, timeout=300
-                    )
-                    if resp.status_code == 200:
-                        st.session_state["result"] = resp.json()
-                        st.success("✅ Analysis complete!")
+                    res = requests.post(f"{BACKEND}/analyze", json=payload, timeout=300)
+                    if res.status_code == 200:
+                        st.session_state["result"] = res.json()
                     else:
-                        st.error(f"Backend error: {resp.status_code} {resp.text}")
+                        st.error(f"Backend Error: {res.text}")
                 except Exception as e:
-                    st.error(f"Error: {e}")
-        else:
-            st.warning("⚠️ Please draw a region first!")
+                    st.error(f"Connection Error: {e}")
 
 with col2:
-    st.subheader("📊 Results & Visualization")
-
+    st.subheader("📊 3. Analysis Results")
+    
     if "result" in st.session_state:
         res = st.session_state["result"]
-        st.image(res["ndvi_thumb"], caption="NDVI Change Visualization")
-        st.write("### NDVI Stats")
-        st.json(res["stats"])
+        
+        # Main Result Image
+        if "ndvi_thumb" in res:
+            st.markdown("#### Vegetation Change Map")
+            st.image(res["ndvi_thumb"], 
+                     caption="Red: Forest Loss | White: No Change | Green: Forest Gain", 
+                     use_container_width=True)
+        
+        # Metrics Row
+        stats = res.get("stats", {})
+        if stats:
+            st.markdown("---")
+            mean_change = stats.get("NDVI_change", 0)
+            
+            m1, m2 = st.columns(2)
+            with m1:
+                st.metric("Mean NDVI Change", f"{mean_change:.4f}", 
+                          delta="Gain" if mean_change > 0 else "Loss", 
+                          delta_color="normal" if mean_change > 0 else "inverse")
+            
+            with m2:
+                status = "Healthy Growth" if mean_change > 0.05 else "Potential Deforestation" if mean_change < -0.05 else "Stable"
+                st.write(f"**Region Status:** {status}")
 
-        if "NDVI_change" in res["stats"]:
-            st.bar_chart({"NDVI Change Mean": [res["stats"]["NDVI_change"]]})
+            with st.expander("View Detailed Statistics"):
+                st.json(stats)
+        
+        if st.button("🔄 Start New Analysis"):
+            if "result" in st.session_state:
+                del st.session_state["result"]
+            st.rerun()
+            
     else:
-        st.info("No results yet — draw a region and click Analyze.")
+        st.info("Analysis results (NDVI change maps and statistics) will be displayed here once you click 'Run Analysis'.")

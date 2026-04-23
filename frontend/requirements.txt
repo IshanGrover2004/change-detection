@@ -1,1 +1,5 @@
 leafmap
+streamlit
+streamlit-folium
+requests
+folium

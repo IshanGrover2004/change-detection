@@ -1,3 +1,6 @@
-
 fastapi
 uvicorn
+earthengine-api
+google-api-python-client
+pydantic
+shapely
