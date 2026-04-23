@@ -1,0 +1,6 @@
+streamlit
+leafmap
+streamlit-folium
+earthengine-api
+folium
+requests
