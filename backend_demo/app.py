@@ -184,11 +184,21 @@ def analyze(req: ROIRequest):
             reducer=ee.Reducer.histogram(), geometry=roi_ee, scale=30, maxPixels=1e13
         ).getInfo()
 
+        # NDVI/NDWI mean change
+        avg_stats = ndvi_change.addBands(ndwi_change).reduceRegion(
+            reducer=ee.Reducer.mean(),
+            geometry=roi_ee,
+            scale=30,
+            maxPixels=1e13
+        ).getInfo()
+
         response = {
             "ndvi_change_thumb": ndvi_url,
             "ndwi_change_thumb": ndwi_url,
             "deforestation_geojson": vectors_geojson,
             "stats": {
+                "NDVI_change": avg_stats.get("NDVI_change", 0),
+                "NDWI_change": avg_stats.get("NDWI_change", 0),
                 "deforestation_m2": def_area_val,
                 "deforestation_km2": def_area_val / 1e6 if def_area_val else 0,
                 "water_gain_m2": water_area_val,

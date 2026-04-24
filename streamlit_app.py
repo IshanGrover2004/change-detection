@@ -32,7 +32,7 @@ def init_ee():
 success, msg = init_ee()
 
 # --- ANALYSIS LOGIC ---
-def get_ndvi(geom, year):
+def get_indices(geom, year):
     collection = (
         ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
         .filterBounds(geom)
@@ -45,7 +45,8 @@ def get_ndvi(geom, year):
         return None
         
     ndvi = collection.normalizedDifference(["B8", "B4"]).rename("NDVI")
-    return ndvi.clip(geom)
+    ndwi = collection.normalizedDifference(["B3", "B8"]).rename("NDWI")
+    return collection.addBands([ndvi, ndwi]).clip(geom)
 
 def run_analysis(geojson, year_before, year_after):
     try:
@@ -57,13 +58,14 @@ def run_analysis(geojson, year_before, year_after):
         else:
             geom = ee.Geometry(geojson)
 
-        ndvi1 = get_ndvi(geom, year_before)
-        ndvi2 = get_ndvi(geom, year_after)
+        indices1 = get_indices(geom, year_before)
+        indices2 = get_indices(geom, year_after)
         
-        if ndvi1 is None or ndvi2 is None:
+        if indices1 is None or indices2 is None:
             return None, "No imagery found for one of the selected years."
 
-        ndvi_diff = ndvi2.subtract(ndvi1).rename("NDVI_change")
+        ndvi_diff = indices2.select("NDVI").subtract(indices1.select("NDVI")).rename("NDVI_change")
+        ndwi_diff = indices2.select("NDWI").subtract(indices1.select("NDWI")).rename("NDWI_change")
 
         # Stats
         stats = ndvi_diff.reduceRegion(
@@ -72,9 +74,35 @@ def run_analysis(geojson, year_before, year_after):
             scale=30,
             maxPixels=1e13
         ).getInfo()
+        
+        # Area calculations using thresholds
+        pixelArea = ee.Image.pixelArea()
+        
+        veg_loss_mask = ndvi_diff.lt(-0.15)
+        veg_gain_mask = ndvi_diff.gt(0.15)
+        water_gain_mask = ndwi_diff.gt(0.1)
+        water_loss_mask = ndwi_diff.lt(-0.1)
+        
+        def get_area_km2(mask):
+            area_m2 = pixelArea.updateMask(mask).reduceRegion(
+                reducer=ee.Reducer.sum(),
+                geometry=geom,
+                scale=30,
+                maxPixels=1e13
+            ).getInfo().get("area", 0)
+            return (area_m2 or 0) / 1e6
+
+        areas = {
+            "veg_loss_km2": get_area_km2(veg_loss_mask),
+            "veg_gain_km2": get_area_km2(veg_gain_mask),
+            "water_gain_km2": get_area_km2(water_gain_mask),
+            "water_loss_km2": get_area_km2(water_loss_mask)
+        }
+        
+        stats.update(areas)
 
         # Visualization
-        thumb_params = {
+        thumb_params_ndvi = {
             "region": geom,
             "dimensions": 1024,
             "format": "png",
@@ -82,9 +110,24 @@ def run_analysis(geojson, year_before, year_after):
             "max": 0.2,
             "palette": ["#FF0000", "#FFFFFF", "#00FF00"]
         }
-        url = ndvi_diff.getThumbURL(thumb_params)
         
-        return {"stats": stats, "url": url}, None
+        thumb_params_ndwi = {
+            "region": geom,
+            "dimensions": 1024,
+            "format": "png",
+            "min": -0.2, 
+            "max": 0.2,
+            "palette": ["#A52A2A", "#FFFFFF", "#0000FF"]
+        }
+        
+        ndvi_url = ndvi_diff.getThumbURL(thumb_params_ndvi)
+        ndwi_url = ndwi_diff.getThumbURL(thumb_params_ndwi)
+        
+        return {
+            "stats": stats, 
+            "ndvi_url": ndvi_url,
+            "ndwi_url": ndwi_url
+        }, None
     except Exception as e:
         return None, str(e)
 
@@ -139,11 +182,55 @@ with col2:
     st.subheader("📊 3. Analysis Results")
     if "deploy_result" in st.session_state:
         res = st.session_state["deploy_result"]
-        st.image(res["url"], caption="Red: Loss | Green: Gain", use_container_width=True)
-        
         stats = res.get("stats", {})
-        mean_change = stats.get("NDVI_change", 0)
-        st.metric("Mean NDVI Change", f"{mean_change:.4f}")
-        st.json(stats)
+        
+        st.markdown("#### 🌿 Vegetation Change (NDVI)")
+        st.image(res["ndvi_url"], caption="Red: Loss | White: No Change | Green: Gain", width="stretch")
+        
+        st.markdown("#### 💧 Water/Moisture Change (NDWI)")
+        st.image(res["ndwi_url"], caption="Brown: Loss | White: No Change | Blue: Gain", width="stretch")
+        
+        # Human-Friendly Insights Section
+        st.markdown("---")
+        st.subheader("💡 Key Environmental Insights")
+        
+        m1, m2 = st.columns(2)
+        
+        with m1:
+            st.markdown("#### 🌳 Vegetation Impact")
+            loss = stats.get("veg_loss_km2", 0)
+            gain = stats.get("veg_gain_km2", 0)
+            
+            if loss > 0.01:
+                st.warning(f"**Significant Forest Loss:** ~{loss:.2f} km²")
+            if gain > 0.01:
+                st.success(f"**Significant Growth:** ~{gain:.2f} km²")
+            if loss <= 0.01 and gain <= 0.01:
+                st.info("Vegetation levels remained stable.")
+
+        with m2:
+            st.markdown("#### 💧 Water & Moisture")
+            w_gain = stats.get("water_gain_km2", 0)
+            w_loss = stats.get("water_loss_km2", 0)
+            
+            if w_gain > 0.01:
+                st.info(f"**Water Increase:** ~{w_gain:.2f} km²")
+            if w_loss > 0.01:
+                st.error(f"**Drying/Water Loss:** ~{w_loss:.2f} km²")
+            if w_gain <= 0.01 and w_loss <= 0.01:
+                st.info("Water/Moisture levels stable.")
+
+        st.markdown("---")
+        st.subheader("📈 Detailed Index Metrics")
+        
+        mean_ndvi = stats.get("NDVI_change", 0)
+        mean_ndwi = stats.get("NDWI_change", 0)
+        
+        m1, m2 = st.columns(2)
+        m1.metric("Mean NDVI Change", f"{mean_ndvi:.4f}")
+        m2.metric("Mean NDWI Change", f"{mean_ndwi:.4f}")
+        
+        with st.expander("Detailed Stats"):
+            st.json(stats)
     else:
         st.info("Results will appear here.")

@@ -48,7 +48,7 @@ def analyze(req: AnalysisRequest):
         else:
             geom = ee.Geometry(geojson)
 
-        def get_ndvi(year):
+        def get_indices(year):
             # Using S2_SR_HARMONIZED for consistent values
             collection = (
                 ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
@@ -62,14 +62,16 @@ def analyze(req: AnalysisRequest):
                 raise ValueError(f"No Sentinel-2 imagery available for {year}")
             
             ndvi = collection.normalizedDifference(["B8", "B4"]).rename("NDVI")
-            return ndvi.clip(geom)
+            ndwi = collection.normalizedDifference(["B3", "B8"]).rename("NDWI")
+            return collection.addBands([ndvi, ndwi]).clip(geom)
 
-        # Generate NDVI for both years
-        ndvi1 = get_ndvi(req.year_before)
-        ndvi2 = get_ndvi(req.year_after)
+        # Generate Indices for both years
+        indices1 = get_indices(req.year_before)
+        indices2 = get_indices(req.year_after)
         
         # Calculate Change
-        ndvi_diff = ndvi2.subtract(ndvi1).rename("NDVI_change")
+        ndvi_diff = indices2.select("NDVI").subtract(indices1.select("NDVI")).rename("NDVI_change")
+        ndwi_diff = indices2.select("NDWI").subtract(indices1.select("NDWI")).rename("NDWI_change")
 
         # Get stats
         stats = ndvi_diff.reduceRegion(
@@ -78,26 +80,78 @@ def analyze(req: AnalysisRequest):
             scale=30,
             maxPixels=1e13
         ).getInfo()
+        
+        ndwi_stats = ndwi_diff.reduceRegion(
+            reducer=ee.Reducer.mean(),
+            geometry=geom,
+            scale=30,
+            maxPixels=1e13
+        ).getInfo()
+        
+        # Area calculations using thresholds
+        # Thresholds:
+        # NDVI < -0.15: Significant Vegetation Loss (Deforestation)
+        # NDVI > 0.15: Significant Vegetation Gain (Reforestation/Growth)
+        # NDWI > 0.1: Significant Water Gain (Flooding/New water)
+        # NDWI < -0.1: Significant Water Loss (Drying/Drought)
+        
+        pixelArea = ee.Image.pixelArea()
+        
+        veg_loss_mask = ndvi_diff.lt(-0.15)
+        veg_gain_mask = ndvi_diff.gt(0.15)
+        water_gain_mask = ndwi_diff.gt(0.1)
+        water_loss_mask = ndwi_diff.lt(-0.1)
+        
+        def get_area_km2(mask):
+            area_m2 = pixelArea.updateMask(mask).reduceRegion(
+                reducer=ee.Reducer.sum(),
+                geometry=geom,
+                scale=30,
+                maxPixels=1e13
+            ).getInfo().get("area", 0)
+            return (area_m2 or 0) / 1e6
 
-        logger.info(f"Calculated Stats: {stats}")
+        areas = {
+            "veg_loss_km2": get_area_km2(veg_loss_mask),
+            "veg_gain_km2": get_area_km2(veg_gain_mask),
+            "water_gain_km2": get_area_km2(water_gain_mask),
+            "water_loss_km2": get_area_km2(water_loss_mask)
+        }
+        
+        stats.update(ndwi_stats)
+        stats.update(areas)
+
+        logger.info(f"Calculated Stats with Areas: {stats}")
 
         # Explicitly define Thumbnail parameters
-        # Adding 'region' and 'dimensions' is crucial for correct framing
-        thumb_params = {
+        ndvi_thumb_params = {
             "region": geom,
-            "dimensions": 1024,  # High res
+            "dimensions": 1024,
             "format": "png",
             "min": -0.2, 
             "max": 0.2,
-            "palette": ["#FF0000", "#FFFFFF", "#00FF00"] # Direct hex codes for clarity: Red, White, Green
+            "palette": ["#FF0000", "#FFFFFF", "#00FF00"]
         }
         
-        url = ndvi_diff.getThumbURL(thumb_params)
-        logger.info(f"Generated URL: {url}")
+        ndwi_thumb_params = {
+            "region": geom,
+            "dimensions": 1024,
+            "format": "png",
+            "min": -0.2, 
+            "max": 0.2,
+            "palette": ["#A52A2A", "#FFFFFF", "#0000FF"] # Brown, White, Blue
+        }
+        
+        ndvi_url = ndvi_diff.getThumbURL(ndvi_thumb_params)
+        ndwi_url = ndwi_diff.getThumbURL(ndwi_thumb_params)
+        
+        logger.info(f"Generated NDVI URL: {ndvi_url}")
+        logger.info(f"Generated NDWI URL: {ndwi_url}")
 
         return {
             "stats": stats,
-            "ndvi_thumb": url,
+            "ndvi_thumb": ndvi_url,
+            "ndwi_thumb": ndwi_url,
             "year_before": req.year_before,
             "year_after": req.year_after
         }
