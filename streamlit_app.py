@@ -234,3 +234,5 @@ with col2:
             st.json(stats)
     else:
         st.info("Results will appear here.")
+
+    st.markdown("---")
